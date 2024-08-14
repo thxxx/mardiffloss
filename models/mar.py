@@ -47,7 +47,7 @@ class MAR(nn.Module):
         self.img_size = img_size
         self.vae_stride = vae_stride
         self.patch_size = patch_size
-        self.seq_h = self.seq_w = img_size // vae_stride // patch_size
+        self.seq_h = self.seq_w = img_size // vae_stride // patch_size # 16
         self.seq_len = self.seq_h * self.seq_w
         self.token_embed_dim = vae_embed_dim * patch_size**2
         self.grad_checkpointing = grad_checkpointing
@@ -169,7 +169,9 @@ class MAR(nn.Module):
         return mask
 
     def forward_mae_encoder(self, x, mask, class_embedding):
+        print("projection 전 ", x.shape) # 16, 256, 16
         x = self.z_proj(x)
+        print("projection 후 ", x.shape) # 16, 256, 768=encoder_embed_dim
         bsz, seq_len, embed_dim = x.shape
 
         # concat buffer
@@ -259,10 +261,9 @@ class MAR(nn.Module):
         return loss
 
     def sample_tokens(self, bsz, num_iter=64, cfg=1.0, cfg_schedule="linear", labels=None, temperature=1.0, progress=False):
-
         # init and sample generation orders
-        mask = torch.ones(bsz, self.seq_len).cuda()
-        tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda()
+        mask = torch.ones(bsz, self.seq_len).cuda() # self.seq_len은 self.seq_h * self.seq_w = 16 * 16
+        tokens = torch.zeros(bsz, self.seq_len, self.token_embed_dim).cuda() # token_embed_dim = vae_embed_dim * patch_size**2 = 16
         orders = self.sample_orders(bsz)
 
         indices = list(range(num_iter))
@@ -270,14 +271,15 @@ class MAR(nn.Module):
             indices = tqdm(indices)
         # generate latents
         for step in indices:
-            cur_tokens = tokens.clone()
-
+            cur_tokens = tokens.clone() # [bsz, 256, 16]
             # class embedding and CFG
             if labels is not None:
-                class_embedding = self.class_emb(labels)
+                class_embedding = self.class_emb(labels) # 1024
+                print("class_embedding : ", class_embedding.shape)
             else:
                 class_embedding = self.fake_latent.repeat(bsz, 1)
-            if not cfg == 1.0:
+            
+            if not cfg == 1.0: # classifier free guidance 적용
                 tokens = torch.cat([tokens, tokens], dim=0)
                 class_embedding = torch.cat([class_embedding, self.fake_latent.repeat(bsz, 1)], dim=0)
                 mask = torch.cat([mask, mask], dim=0)
@@ -298,10 +300,13 @@ class MAR(nn.Module):
 
             # get masking for next iteration and locations to be predicted in this iteration
             mask_next = mask_by_order(mask_len[0], orders, bsz, self.seq_len)
+            # print("mask : ", mask)
             if step >= num_iter - 1:
                 mask_to_pred = mask[:bsz].bool()
             else:
                 mask_to_pred = torch.logical_xor(mask[:bsz].bool(), mask_next.bool())
+            # print("mask_to_pred : ", mask_to_pred)
+            
             mask = mask_next
             if not cfg == 1.0:
                 mask_to_pred = torch.cat([mask_to_pred, mask_to_pred], dim=0)
@@ -315,7 +320,10 @@ class MAR(nn.Module):
                 cfg_iter = cfg
             else:
                 raise NotImplementedError
+
+            # z는 768, sampled_token_latent는 16
             sampled_token_latent = self.diffloss.sample(z, temperature, cfg_iter)
+            print("z, sampled_token_latent : ", z.shape, sampled_token_latent.shape )
             if not cfg == 1.0:
                 sampled_token_latent, _ = sampled_token_latent.chunk(2, dim=0)  # Remove null class samples
                 mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
@@ -324,7 +332,9 @@ class MAR(nn.Module):
             tokens = cur_tokens.clone()
 
         # unpatchify
-        tokens = self.unpatchify(tokens)
+        print("unpatchify 입력 : ", tokens.shape)
+        tokens = self.unpatchify(tokens) # bsz, 256, 16 => bsz, 16, 16, 16
+        print("unpatchify 출력 : ", tokens.shape)
         return tokens
 
 
